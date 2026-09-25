@@ -22,6 +22,7 @@ It's a single FastAPI app (no separate frontend) that:
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dims) via `HuggingFaceEmbeddings` |
 | Vector store | [Qdrant](https://qdrant.tech) — collections `knowledge_base` + `qa_memory` |
 | Local QA cache | SQLite (`_local_qa_cache.sqlite3`) — exact question → stored answer |
+| Orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) — `/ask` is a compiled `StateGraph` (`gate → local_cache → qa_memory → retrieve → direct|llm`) |
 | Markdown loading | `DirectoryLoader` + `TextLoader`, `RecursiveCharacterTextSplitter` |
 | File watching | `watchfiles` |
 
@@ -79,6 +80,55 @@ Inspecting and analyzing the cache:
 * `DELETE /cache` — wipe the local cache.
 
 A small capability detector looks for technology names mentioned in a "can X do Y?" question, cross-checks them against the notes, and answers "No / not in the stack" for anything missing — instead of the RAG chain confidently guessing.
+
+### LangGraph pipeline
+
+`/ask` is a compiled [LangGraph](https://langchain-ai.github.io/langgraph/) state graph
+(`main.py: build_ask_graph`). Each node reads/writes the shared `AskState`
+(`question`, `answer`, `sources`, `missing`, `retrieved`, `top_score`, `status`) and
+returns a partial update; conditional edges short-circuit as early as possible.
+
+```
+ START
+   │
+   ▼
+ ▢ gate ────────── missing tech ──► END      ("No, not in the stack", no retrieval/LLM)
+   │ passes
+   ▼
+ ▢ local_cache ── exact SQLite hit ──► END   (cached answer, no LLM)
+   │ miss
+   ▼
+ ▢ qa_memory ── near-duplicate hit ──► END   (stored Q→A, no LLM)
+   │ miss
+   ▼
+ ▢ retrieve ── error / no docs ──► END
+   │ hits
+   ├─ top_score ≥ 0.90 ──► ▢ direct_answer ──► END  (raw chunk, no LLM)
+   └─ else ────────────► ▢ llm_answer ──► END       (Groq synthesis)
+```
+
+| # | Node | Short-circuits to END when… | Resulting `status` |
+|---|---|---|---|
+| 1 | `gate` | a named tech in the question is absent from the KB | `missing` |
+| 2 | `local_cache` | exact (normalized) question found in SQLite | `local_hit` |
+| 3 | `qa_memory` | vector-similar stored Q→A pair ≥ `QA_HIT_SCORE` (0.82) | `qa_hit` |
+| 4 | `retrieve` | nothing above `SCORE_THRESHOLD` (0.5) / retrieval error | `none`, `error` |
+| 5a | `direct_answer` | top dense score ≥ `DIRECT_ANSWER_SCORE` (0.90) — answers with the raw chunk | `direct` |
+| 5b | `llm_answer` | otherwise — Groq synthesizes from the retrieved chunks | `llm` |
+
+Tuning knobs (top of `main.py`):
+
+* `TOP_K` / `RETRIEVE_K` — how many chunks are returned vs. pulled as candidate pool.
+* `SCORE_THRESHOLD` — dense cosine gate for candidates; final order is the hybrid rerank
+  (`LEXICAL_BODY_BOOST` / `LEXICAL_PATH_BOOST` / `LEXICAL_META_BOOST` keyword boosts,
+  keyword matches win but true cosine is preserved for the direct-answer gate).
+* `DIRECT_ANSWER_SCORE`, `QA_HIT_SCORE` — confidence gates that skip the LLM.
+
+**Extending:** add a node with `graph.add_node("name", fn)`, then a conditional edge
+(`graph.add_conditional_edges("parent", router_fn)`) that returns the next node name or
+`END`; set its route on `AskState` so it behaves like the nodes above.
+
+Both answer nodes persist the Q→A pair (SQLite + `qa_memory`), so every path is cheap on a re-ask.
 
 ### Note skeleton (frontmatter schema)
 
@@ -165,7 +215,7 @@ All endpoints return JSON.
 | `GET` | `/` | — | Health check |
 | `POST` | `/ingest` | — | Full rebuild of the vector index |
 | `POST` | `/sync` | — | Incremental sync (new/edited/removed notes) |
-| `POST` | `/ask` | `{"question": "..."}` | RAG answer with `sources:` and `answer:` |
+| `POST` | `/ask` | `{"question": "..."}` | Compiled LangGraph: capability gate → local cache → QA memory → retrieve → (direct \| LLM). Returns `sources:` + `answer:` |
 | `GET` | `/cache` | — | List locally-cached Q→A pairs (most-reused first) |
 | `GET` | `/cache/analysis` | — | Stats over cached answers |
 | `DELETE` | `/cache` | — | Clear the local Q→A cache |
