@@ -158,6 +158,41 @@ related: ["[[Next.js]]"]           # obsidian links, not ingested
 
 ---
 
+## Design Decisions
+
+Four deliberate choices (not defaults):
+
+1. **`can X do Y?` is a rule, not a guess** — capability questions are fact-checks, so they're
+   answered by cross-checking the question's tokens against the vault instead of letting the
+   LLM hallucinate a "yes". It also runs before any retrieval, so a No costs almost nothing.
+
+2. **Offline exact cache + vector near-dupe layer** — SQLite answers are an idempotent
+   *guarantee* (the same question string never re-hits the LLM), while the `qa_memory` vector
+   collection is a *heuristic* for rephrased questions. Two trust models, two stores.
+
+3. **Lazy embedding load** — the embedding model only loads when a chunk actually needs
+   embedding, so cold starts stay clean and the file watcher idles lighter between syncs.
+
+4. **The note schema is itself a retrieval signal** — embeddings are weak on short structured
+   notes, so frontmatter (`category` / `summary` / `tech`) and the file path feed the hybrid
+   rerank. A "frontend framework?" question ranks the frontend-folder notes because the schema
+   says so, not because the embedding guessed.
+
+### Token savings for a repeated assistant
+
+Because every terminal path short-circuits, **the same AI assistant (e.g. an IDE/agent that
+keeps asking the KB) gets almost free on re-asks** — tokens, cost, and latency all drop:
+
+* exact re-ask → SQLite hit → **0 LLM tokens**
+* near-duplicate re-ask → `qa_memory` hit → **0 LLM tokens**
+* high-confidence retrieval (`≥ 0.90`) → direct chunk answer → **0 LLM tokens**
+* capability "No" → **0 LLM tokens** (and no retrieval)
+* unchanged notes → cached embeddings reused → no re-embedding work
+
+Only genuinely new questions spend Groq tokens, and their answer is stored, so the next time
+that question or a cousin of it comes up, the bill is again ~0. In a long IDE session this is
+the difference between dozens of LLM calls and just the first occurrence of each question.
+
 ## Getting Started
 
 ### Prerequisites
