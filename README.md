@@ -2,7 +2,7 @@
 
 A personal **AI knowledge base** built on your own notes. Point it at a folder of Markdown notes (portfolio skills, projects, tooling), and it builds a searchable semantic index you can ask questions against — no folders left unindexed.
 
-It's a single FastAPI app (no separate frontend) that:
+It's a single FastAPI app (no separate frontend), organized into small focused modules, that:
 
 1. **Indexes** every `.md` note in a folder (`Portfolio/**/*.md`), splits it into chunks, embeds each chunk, and stores it in [Qdrant](https://qdrant.tech).
 2. **Auto-re-ingests** when you add, edit, or delete a note — a file watcher detects the change and only re-embeds the files that actually changed.
@@ -84,7 +84,7 @@ A small capability detector looks for technology names mentioned in a "can X do 
 ### LangGraph pipeline
 
 `/ask` is a compiled [LangGraph](https://langchain-ai.github.io/langgraph/) state graph
-(`main.py: build_ask_graph`). Each node reads/writes the shared `AskState`
+(`graph.py: build_ask_graph`). Each node reads/writes the shared `AskState`
 (`question`, `answer`, `sources`, `missing`, `retrieved`, `top_score`, `status`) and
 returns a partial update; conditional edges short-circuit as early as possible.
 
@@ -116,7 +116,7 @@ returns a partial update; conditional edges short-circuit as early as possible.
 | 5a | `direct_answer` | top dense score ≥ `DIRECT_ANSWER_SCORE` (0.90) — answers with the raw chunk | `direct` |
 | 5b | `llm_answer` | otherwise — Groq synthesizes from the retrieved chunks | `llm` |
 
-Tuning knobs (top of `main.py`):
+Tuning knobs (top of `config.py`):
 
 * `TOP_K` / `RETRIEVE_K` — how many chunks are returned vs. pulled as candidate pool.
 * `SCORE_THRESHOLD` — dense cosine gate for candidates; final order is the hybrid rerank
@@ -276,7 +276,14 @@ All endpoints return JSON.
 
 ```
 ai-knowledge-base/
-├── main.py                  # FastAPI app: RAG, ingest, sync, /ask
+├── main.py                  # thin entry point: `from api import app` (uvicorn main:app)
+├── api.py                   # FastAPI app, lifespan, routes (/ingest, /sync, /ask, /cache)
+├── graph.py                 # LangGraph /ask StateGraph + capability detector
+├── ingest.py                # notes, manifest, embedding cache, splitting, sync, watcher
+├── store.py                 # Qdrant client, vector stores, QA memory (near-duplicate reuse)
+├── cache.py                 # SQLite exact-question Q->A cache (list/analysis/clear)
+├── embeddings.py            # lazy HuggingFace embedding singleton
+├── config.py                # all tuning constants
 ├── Portfolio/               # YOUR notes (git-ignored generated files live here)
 ├── requirements.txt
 ├── .env.example             # template — copy to .env (never committed)
