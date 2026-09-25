@@ -1,0 +1,430 @@
+{
+  "info": {
+    "_postman_id": "b6f7c42c-9d41-4c81-9a38-11b4f3c52a48",
+    "name": "AI Knowledge Base /ask (LangGraph)",
+    "description": "Test collection for the LangGraph-powered knowledge base API.\n\nRoutes (live from main.py):\n  GET  {{baseUrl}}/            - service banner\n  POST {{baseUrl}}/ingest      - full rebuild (reuses cached embeddings)\n  POST {{baseUrl}}/sync        - incremental sync of changed/removed notes\n  POST {{baseUrl}}/ask         - compiled LangGraph StateGraph: gate -> local SQLite cache -> QA memory -> retrieve -> (direct | LLM)\n  GET  {{baseUrl}}/cache       - list locally-cached Q->A pairs (most-reused first)\n  GET  {{baseUrl}}/cache/analysis - stats over cached answers (status mix, hits, top questions/sources)\n  DELETE {{baseUrl}}/cache     - wipe the local Q->A cache\n\n/ask flow (short-circuit rules):\n  1. Capability gate : a named tech absent from the KB -> immediate \"No\", no retrieval, no LLM\n  2. Local cache     : exact (normalized) question in SQLite -> reuse answer, no LLM/retrieval\n  3. QA memory       : stored Q->A pair hit -> reuse it, no LLM, no re-query\n  4. Retrieve        : top chunk score >= 0.90 -> direct answer from KB, no LLM\n                     : else -> LLM answer with chunk context\n  Both successful answer nodes persist the Q->A pair into the local SQLite cache + QA memory.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000",
+      "type": "default"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Service banner",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/",
+          "host": ["{{baseUrl}}"],
+          "path": [""]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+              "pm.test(\"returns banner\", function () { pm.expect(pm.response.json().message).to.include(\"AI Knowledge Base\"); });"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Ingest notes (full rebuild)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ingest",
+          "host": ["{{baseUrl}}"],
+          "path": ["ingest"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"ingest ok\", function () { pm.response.to.have.status(200); pm.response.to.have.jsonBody(); });",
+              "pm.test(\"chunks is a number\", function () { pm.expect(typeof pm.response.json().chunks).to.eql('number'); });",
+              "console.log(\"chunks ingested:\", pm.response.json().chunks);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Sync notes (incremental)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/sync",
+          "host": ["{{baseUrl}}"],
+          "path": ["sync"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"sync ok\", function () { pm.response.to.have.status(200); });",
+              "console.log(\"sync result:\", JSON.stringify(pm.response.json()));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4a. /ask - capability gate (No, single tech)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Does Khaled work with COBOL?\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + shape\", function () { pm.response.to.have.status(200); pm.response.to.have.jsonBody(); });",
+              "pm.test(\"short-circuits with No (no retrieval/LLM)\", function () {",
+              "  const j = pm.response.json();",
+              "  pm.expect(j.answer).to.match(/No/);",
+              "  pm.expect(j.sources).to.eql([]);",
+              "});",
+              "console.log('A:', pm.response.json().answer);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4b. /ask - capability gate (No, multiple techs)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Does Khaled work with COBOL and ALGOL?\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + No\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json().answer).to.match(/No/); });",
+              "pm.test(\"no sources (gate short-circuit)\", function () { pm.expect(pm.response.json().sources).to.eql([]); });",
+              "console.log('A:', pm.response.json().answer);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4c. /ask - QA memory reuse (run TWICE)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Does Khaled work with React?\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Run this request TWICE:",
+              "//   1st run -> retrieval (and possibly the LLM); the Q->A pair is stored in QA memory (qdrant collection 'qa_memory').",
+              "//   2nd run -> QA memory hit (score >= 0.82) -> reuses the stored answer, NO LLM, NO re-query.",
+              "// Watch the server console: 'QA memory hit' means the short-circuit fired.",
+              "pm.test(\"200 + reusable shape\", function () {",
+              "  pm.response.to.have.status(200);",
+              "  const j = pm.response.json();",
+              "  pm.expect(j.answer).to.be.a('string').and.not.empty;",
+              "  pm.expect(Array.isArray(j.sources)).to.be.true;",
+              "});",
+              "console.log('A:', pm.response.json().answer);",
+              "console.log('sources:', JSON.stringify(pm.response.json().sources));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4d. /ask - direct answer from KB (no LLM)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"What is Khaled's preferred frontend framework?\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + answer with sources\", function () {",
+              "  pm.response.to.have.status(200);",
+              "  const j = pm.response.json();",
+              "  pm.expect(j.answer).to.be.a('string').and.not.empty;",
+              "  pm.expect(j.sources.length).to.be.greaterThan(0);",
+              "});",
+              "console.log('A:', pm.response.json().answer);",
+              "console.log('sources:', JSON.stringify(pm.response.json().sources, null, 2));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4e. /ask - LLM answer (top chunk not confident enough)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Explain Khaled's streaming pipeline.\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + LLM answer\", function () {",
+              "  pm.response.to.have.status(200);",
+              "  const j = pm.response.json();",
+              "  pm.expect(j.answer).to.be.a('string').and.not.empty;",
+              "  pm.expect(j.sources.length).to.be.greaterThan(0);",
+              "});",
+              "console.log('A:', pm.response.json().answer);",
+              "console.log('sources:', JSON.stringify(pm.response.json().sources, null, 2));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4f. /ask - unknown capability (repeat for each of COBOL, ALGOL, Ada...)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"question\": \"Is Ada in his stack?\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/ask",
+          "host": ["{{baseUrl}}"],
+          "path": ["ask"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + No\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json().answer).to.match(/No/); });",
+              "pm.test(\"gate skips LLM -> empty sources\", function () { pm.expect(pm.response.json().sources).to.eql([]); });",
+              "// 2nd run of THIS request is served from the local SQLite cache (\"Local QA cache hit\") without re-running the gate.",
+              "console.log('A:', pm.response.json().answer);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. /cache - list stored Q->A pairs",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/cache",
+          "host": ["{{baseUrl}}"],
+          "path": ["cache"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + array\", function () { pm.response.to.have.status(200); pm.expect(Array.isArray(pm.response.json())).to.be.true; });",
+              "console.log('cached pairs:', pm.response.json().length);"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. /cache/analysis - stats over cached answers",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/cache/analysis",
+          "host": ["{{baseUrl}}"],
+          "path": ["cache", "analysis"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"200 + shape\", function () {",
+              "  pm.response.to.have.status(200);",
+              "  const j = pm.response.json();",
+              "  pm.expect(j).to.have.property('total');",
+              "  pm.expect(j).to.have.property('by_status');",
+              "  pm.expect(j).to.have.property('top_questions');",
+              "});",
+              "console.log(JSON.stringify(pm.response.json(), null, 2));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    }
+  ]
+}

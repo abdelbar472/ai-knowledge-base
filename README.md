@@ -7,7 +7,9 @@ It's a single FastAPI app (no separate frontend) that:
 1. **Indexes** every `.md` note in a folder (`Portfolio/**/*.md`), splits it into chunks, embeds each chunk, and stores it in [Qdrant](https://qdrant.tech).
 2. **Auto-re-ingests** when you add, edit, or delete a note — a file watcher detects the change and only re-embeds the files that actually changed.
 3. **Answers** questions using retrieval-augmented generation (RAG): finds the most relevant note chunks and lets a Groq-hosted LLM answer from that context only.
-4. **Remembers what it can't do** — technologies that aren't in the knowledge base are reported as "not part of the stack" instead of being hallucinated.
+4. **Never asks the LLM the same question twice** — every question→answer pair is cached in a local SQLite database, so an exact re-ask is answered instantly with no retrieval, no Qdrant, and no LLM call (a vector `qa_memory` collection catches near-duplicate re-asks).
+5. **Analyzes cached answers** — `/cache/analysis` reports the answer mix (direct / LLM / missing...), reuse counts, and top questions and sources.
+6. **Remembers what it can't do** — technologies that aren't in the knowledge base are reported as "not part of the stack" instead of being hallucinated.
 
 ---
 
@@ -18,7 +20,8 @@ It's a single FastAPI app (no separate frontend) that:
 | API framework | [FastAPI](https://fastapi.tiangolo.com) |
 | LLM | [Groq](https://groq.com) · `ChatGroq` (`openai/gpt-oss-20b`) |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384-dims) via `HuggingFaceEmbeddings` |
-| Vector store | [Qdrant](https://qdrant.tech) — collection `knowledge_base` |
+| Vector store | [Qdrant](https://qdrant.tech) — collections `knowledge_base` + `qa_memory` |
+| Local QA cache | SQLite (`_local_qa_cache.sqlite3`) — exact question → stored answer |
 | Markdown loading | `DirectoryLoader` + `TextLoader`, `RecursiveCharacterTextSplitter` |
 | File watching | `watchfiles` |
 
@@ -60,12 +63,48 @@ This is why startup is model-free: the embedding model loads **lazily**, only wh
 
 ### Asking questions
 
-`/ask` retrieves the `TOP_K` most relevant chunks, filters out any below a relevance-score threshold, and answers strictly from that context. Capability questions are special-cased:
+`/ask` runs a LangGraph pipeline: **capability gate → local SQLite cache → QA memory → retrieve → (direct | LLM)**. It short-circuits as early as possible:
 
-* "can Khaled make a `react` project" → **Yes** (React is in the KB).
-* "can Khaled make a `java` project" → **No** — Java isn't in the knowledge base.
+* **Capability gate** — a named tech absent from the KB → "No" (no retrieval, no LLM).
+* **Local SQLite cache** — an exactly-matching (normalized) question → reuses the stored answer instantly. This is what guarantees the same question never hits the LLM twice.
+* **QA memory** — a near-duplicate question matching a stored Q→A pair above a cosine threshold → reuses that answer (no LLM, no re-query).
+* **Retrieve** — the top chunk at ≥ `0.90` relevance → answered directly from the KB (no LLM); otherwise the LLM synthesizes an answer from the retrieved chunks only.
+
+Every terminal answer (including "No" and "no relevant documents") is persisted in the local cache, so repeated asks short-circuit without touching Qdrant or Groq.
+
+Inspecting and analyzing the cache:
+
+* `GET /cache` — all stored Q→A pairs, most-reused first.
+* `GET /cache/analysis` — stats: total pairs, total reuses, breakdown by answer type (`llm`, `direct`, `missing`...), average answer length, top questions, top sources.
+* `DELETE /cache` — wipe the local cache.
 
 A small capability detector looks for technology names mentioned in a "can X do Y?" question, cross-checks them against the notes, and answers "No / not in the stack" for anything missing — instead of the RAG chain confidently guessing.
+
+### Note skeleton (frontmatter schema)
+
+Every note follows a small YAML frontmatter template. It is *the* thing that makes the
+retrieval good: `category`, `summary`, and `tech` are extracted at ingest time, stored on
+every chunk, and feed the keyword boost (`LEXICAL_META_BOOST`).
+
+```yaml
+---
+title: React
+category: frontend                  # backend | frontend | devops | data-science | ai | ml | project
+tags:
+  - skill/frontend
+  - uses/react
+summary: "One clear sentence that answers what this is / that Khaled uses it."
+tech: [React, JavaScript]
+related: ["[[Next.js]]"]           # obsidian links, not ingested
+---
+```
+
+* Copy `Portfolio/_TEMPLATE.md` for new notes — it's skipped by the ingester (filenames
+  starting with `_` are never indexed), so it won't pollute the knowledge base.
+* `summary` is a single self-contained sentence; announcements like "Khaled uses X for Y"
+  make answers reliable — the LLM answers only from note text.
+* After restructuring existing notes, run `POST /ingest` once so every chunk picks up the
+  new metadata (cached embeddings are reused, only payloads refresh).
 
 ---
 
@@ -127,6 +166,9 @@ All endpoints return JSON.
 | `POST` | `/ingest` | — | Full rebuild of the vector index |
 | `POST` | `/sync` | — | Incremental sync (new/edited/removed notes) |
 | `POST` | `/ask` | `{"question": "..."}` | RAG answer with `sources:` and `answer:` |
+| `GET` | `/cache` | — | List locally-cached Q→A pairs (most-reused first) |
+| `GET` | `/cache/analysis` | — | Stats over cached answers |
+| `DELETE` | `/cache` | — | Clear the local Q→A cache |
 
 `/ask` response:
 
@@ -156,7 +198,7 @@ ai-knowledge-base/
 └── .gitignore
 ```
 
-Generated at runtime and git-ignored: `.venv/`, `.vector_cache/`, `.ingest_manifest.json`, `__pycache__/`, `.idea/`.
+Generated at runtime and git-ignored: `.venv/`, `.vector_cache/`, `.ingest_manifest.json`, `_local_qa_cache.sqlite3`, `__pycache__/`, `.idea/`.
 
 ---
 
